@@ -10,7 +10,9 @@ st.secrets (set in the app's Settings > Secrets panel) instead of a local
 version meant to be shown to recruiters.
 """
 
+import hashlib
 import os
+import shutil
 import streamlit as st
 
 # --- Bridge Streamlit secrets into environment variables ---
@@ -43,15 +45,44 @@ st.caption(
     else "Ask questions grounded in the documents you've ingested."
 )
 
-# --- Auto-build the vector store on first run ---
-# We don't commit the vector store binary to git — it's rebuilt from the
-# source documents (which ARE committed) the first time the app starts.
-if not os.path.isdir(PERSIST_DIR):
-    with st.spinner("Setting up for the first time — indexing documents..."):
+
+def _content_fingerprint():
+    """Hash of every file's name + content in DATA_DIR, so we can tell
+    whether the source documents have changed since the last index build."""
+    hasher = hashlib.sha256()
+    files = sorted(ingest.DATA_DIR.iterdir(), key=lambda p: p.name)
+    for f in files:
+        if f.is_file():
+            hasher.update(f.name.encode())
+            hasher.update(f.read_bytes())
+    return hasher.hexdigest()
+
+
+HASH_FILE = os.path.join(PERSIST_DIR, ".content_hash")
+
+# --- Auto-build (or rebuild) the vector store when source documents change ---
+# We don't commit the vector store binary to git — it's built from the
+# source documents (which ARE committed), and rebuilt automatically whenever
+# those documents change, so pushing an updated CV/resume "just works"
+# without any manual reset step.
+current_hash = _content_fingerprint()
+stored_hash = None
+if os.path.isfile(HASH_FILE):
+    with open(HASH_FILE) as f:
+        stored_hash = f.read().strip()
+
+if current_hash != stored_hash:
+    with st.spinner("Documents changed — rebuilding the index..."):
+        if os.path.isdir(PERSIST_DIR):
+            shutil.rmtree(PERSIST_DIR)
+
         docs = ingest.load_documents()
         if docs:
             chunks = ingest.chunk_documents(docs)
             ingest.build_vector_store(chunks)
+            os.makedirs(PERSIST_DIR, exist_ok=True)
+            with open(HASH_FILE, "w") as f:
+                f.write(current_hash)
         else:
             st.error(
                 f"No documents found in `{ingest.DATA_DIR}/`. "
